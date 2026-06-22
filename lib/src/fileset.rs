@@ -82,6 +82,8 @@ pub enum FilePattern {
         dir: RepoPathBuf,
         /// Glob pattern relative to `dir`.
         pattern: Box<Glob>,
+        /// Whether the glob is case-insensitive.
+        icase: bool,
     },
     /// Matches path prefix with glob pattern.
     PrefixGlob {
@@ -89,6 +91,8 @@ pub enum FilePattern {
         dir: RepoPathBuf,
         /// Glob pattern relative to `dir`.
         pattern: Box<Glob>,
+        /// Whether the glob is case-insensitive.
+        icase: bool,
     },
     // TODO: add more patterns:
     // - FilesInPath: files in directory, non-recursively?
@@ -249,7 +253,7 @@ impl FilePattern {
             normalized.as_internal_file_string(),
             icase,
         )?);
-        Ok(Self::FileGlob { dir, pattern })
+        Ok(Self::FileGlob { dir, pattern, icase })
     }
 
     fn prefix_glob_at(
@@ -266,7 +270,7 @@ impl FilePattern {
             normalized.as_internal_file_string(),
             icase,
         )?);
-        Ok(Self::PrefixGlob { dir, pattern })
+        Ok(Self::PrefixGlob { dir, pattern, icase })
     }
 
     /// Returns path if this pattern represents a literal path in a workspace.
@@ -450,8 +454,8 @@ fn build_union_matcher(expressions: &[FilesetExpression]) -> Box<dyn Matcher> {
                 match pattern {
                     FilePattern::FilePath(path) => file_paths.push(path),
                     FilePattern::PrefixPath(path) => prefix_paths.push(path),
-                    FilePattern::FileGlob { dir, pattern } => file_globs.add(dir, pattern),
-                    FilePattern::PrefixGlob { dir, pattern } => prefix_globs.add(dir, pattern),
+                    FilePattern::FileGlob { dir, pattern, .. } => file_globs.add(dir, pattern),
+                    FilePattern::PrefixGlob { dir, pattern, .. } => prefix_globs.add(dir, pattern),
                 }
                 continue;
             }
@@ -633,6 +637,122 @@ pub fn parse_maybe_bare(
     resolve_expression(diagnostics, context.path_converter, &node)
 }
 
+impl std::fmt::Display for FilePattern {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FilePattern::FilePath(path) => {
+                write!(
+                    f,
+                    "root-file:\"{}\"",
+                    crate::dsl_util::escape_string(path.as_internal_file_string())
+                )
+            }
+            FilePattern::PrefixPath(path) => {
+                write!(
+                    f,
+                    "root:\"{}\"",
+                    crate::dsl_util::escape_string(path.as_internal_file_string())
+                )
+            }
+            FilePattern::FileGlob { dir, pattern, icase } => {
+                let suffix = pattern.glob();
+                let full_glob = if dir.is_root() {
+                    suffix.to_owned()
+                } else {
+                    format!("{}/{}", dir.as_internal_file_string(), suffix)
+                };
+                let kind = if *icase {
+                    "root-glob-i"
+                } else {
+                    "root-glob"
+                };
+                write!(
+                    f,
+                    "{}:\"{}\"",
+                    kind,
+                    crate::dsl_util::escape_string(&full_glob)
+                )
+            }
+            FilePattern::PrefixGlob { dir, pattern, icase } => {
+                let suffix = pattern.glob();
+                let full_glob = if dir.is_root() {
+                    suffix.to_owned()
+                } else {
+                    format!("{}/{}", dir.as_internal_file_string(), suffix)
+                };
+                let kind = if *icase {
+                    "root-prefix-glob-i"
+                } else {
+                    "root-prefix-glob"
+                };
+                write!(
+                    f,
+                    "{}:\"{}\"",
+                    kind,
+                    crate::dsl_util::escape_string(&full_glob)
+                )
+            }
+        }
+    }
+}
+
+fn expression_precedence(expr: &FilesetExpression) -> i32 {
+    match expr {
+        FilesetExpression::None => 3,
+        FilesetExpression::All => 3,
+        FilesetExpression::Pattern(_) => 3,
+        FilesetExpression::UnionAll(_) => 1,
+        FilesetExpression::Intersection(_, _) => 2,
+        FilesetExpression::Difference(_, _) => 2,
+    }
+}
+
+fn format_child(parent_precedence: i32, child: &FilesetExpression, is_right: bool) -> String {
+    let child_prec = expression_precedence(child);
+    let need_parens = if child_prec < parent_precedence {
+        true
+    } else if child_prec == parent_precedence {
+        is_right
+    } else {
+        false
+    };
+
+    if need_parens {
+        format!("({})", child)
+    } else {
+        child.to_string()
+    }
+}
+
+impl std::fmt::Display for FilesetExpression {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let prec = expression_precedence(self);
+        match self {
+            FilesetExpression::None => write!(f, "none()"),
+            FilesetExpression::All => write!(f, "all()"),
+            FilesetExpression::Pattern(pattern) => write!(f, "{}", pattern),
+            FilesetExpression::UnionAll(expressions) => {
+                if expressions.is_empty() {
+                    write!(f, "none()")
+                } else {
+                    let formatted = expressions.iter().map(|e| e.to_string()).join(" | ");
+                    write!(f, "{}", formatted)
+                }
+            }
+            FilesetExpression::Intersection(a, b) => {
+                let a_str = format_child(prec, a, false);
+                let b_str = format_child(prec, b, true);
+                write!(f, "{} & {}", a_str, b_str)
+            }
+            FilesetExpression::Difference(a, b) => {
+                let a_str = format_child(prec, a, false);
+                let b_str = format_child(prec, b, true);
+                write!(f, "{} ~ {}", a_str, b_str)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -705,6 +825,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: false,
             },
         )
         "#);
@@ -778,6 +899,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: false,
             },
         )
         "#);
@@ -792,6 +914,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: false,
             },
         )
         "#);
@@ -806,6 +929,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: false,
             },
         )
         "#);
@@ -821,6 +945,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: false,
             },
         )
         "#);
@@ -835,6 +960,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: false,
             },
         )
         "#);
@@ -875,6 +1001,7 @@ mod tests {
                         opts: _,
                         tokens: _,
                     },
+                    icase: false,
                 },
             )
             "#);
@@ -903,6 +1030,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: false,
             },
         )
         "#);
@@ -917,6 +1045,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: false,
             },
         )
         "#);
@@ -931,6 +1060,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: false,
             },
         )
         "#);
@@ -952,6 +1082,7 @@ mod tests {
                         opts: _,
                         tokens: _,
                     },
+                    icase: false,
                 },
             )
             "#);
@@ -984,6 +1115,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: true,
             },
         )
         "#);
@@ -1000,6 +1132,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: true,
             },
         )
         "#);
@@ -1016,6 +1149,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: true,
             },
         )
         "#);
@@ -1032,6 +1166,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: true,
             },
         )
         "#);
@@ -1048,6 +1183,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: false,
             },
         )
         "#);
@@ -1064,6 +1200,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: true,
             },
         )
         "#);
@@ -1080,6 +1217,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: true,
             },
         )
         "#);
@@ -1126,6 +1264,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: false,
             },
         )
         "#);
@@ -1142,6 +1281,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: true,
             },
         )
         "#);
@@ -1166,6 +1306,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: false,
             },
         )
         "#);
@@ -1182,6 +1323,7 @@ mod tests {
                     opts: _,
                     tokens: _,
                 },
+                icase: true,
             },
         )
         "#);
@@ -1330,12 +1472,14 @@ mod tests {
             FilesetExpression::pattern(FilePattern::FileGlob {
                 dir: repo_path_buf(dir),
                 pattern: Box::new(parse_file_glob(pattern, false).unwrap()),
+                icase: false,
             })
         };
         let prefix_glob_expr = |dir: &str, pattern: &str| {
             FilesetExpression::pattern(FilePattern::PrefixGlob {
                 dir: repo_path_buf(dir),
                 pattern: Box::new(parse_file_glob(pattern, false).unwrap()),
+                icase: false,
             })
         };
 
@@ -1487,5 +1631,62 @@ mod tests {
             },
         }
         "#);
+    }
+
+    #[test]
+    fn test_fileset_serialization() -> TestResult {
+        let context = FilesetParseContext {
+            aliases_map: &FilesetAliasesMap::new(),
+            path_converter: &RepoPathUiConverter::Fs {
+                cwd: PathBuf::from("/ws/cur"),
+                base: PathBuf::from("/ws"),
+            },
+        };
+        fn parse(context: &FilesetParseContext, text: &str) -> FilesetParseResult<FilesetExpression> {
+            parse_maybe_bare(&mut FilesetDiagnostics::new(), text, context)
+        }
+
+        let test_cases = vec![
+            "all()",
+            "none()",
+            "root:\"foo/bar\"",
+            "root-file:\"foo/bar\"",
+            "root-glob:\"*.rs\"",
+            "root-glob-i:\"*.RS\"",
+            "root-prefix-glob:\"tests/**\"",
+            "root:\"foo\" | root:\"bar\"",
+            "root:\"foo\" & root-file:\"bar\"",
+            "root:\"foo\" ~ root:\"bar\"",
+            "(root:\"foo\" | root:\"bar\") & root:\"baz\"",
+            "root:\"foo\" | root:\"bar\" & root:\"baz\"",
+            "(root:\"foo\" | root:\"bar\") ~ root:\"baz\"",
+            "root:\"foo\" ~ (root:\"bar\" ~ root:\"baz\")",
+            // Escaping test
+            "root:\"foo\\\"bar\"",
+        ];
+
+        for case in test_cases {
+            let expr = parse(&context, case)?;
+            let serialized = expr.to_string();
+            // Verify that it parses back to the same expression structure
+            let parsed_back = parse(&context, &serialized)?;
+            assert_eq!(
+                format!("{:?}", expr),
+                format!("{:?}", parsed_back),
+                "Failed for case: {}\nSerialized to: {}\nParsed back to: {:?}",
+                case,
+                serialized,
+                parsed_back
+            );
+        }
+
+        // Test that CWD-relative patterns are normalized to root-relative on serialization
+        let cwd_expr = parse(&context, "foo/bar")?; // Parsed as cwd-relative (cur/foo/bar)
+        let serialized = cwd_expr.to_string();
+        assert_eq!(serialized, "root:\"cur/foo/bar\"");
+        let parsed_back = parse(&context, &serialized)?;
+        assert_eq!(format!("{:?}", cwd_expr), format!("{:?}", parsed_back));
+
+        Ok(())
     }
 }
