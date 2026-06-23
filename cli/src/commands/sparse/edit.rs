@@ -13,17 +13,19 @@
 // limitations under the License.
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::io::Write as _;
 
 use itertools::Itertools as _;
-use jj_lib::repo_path::RepoPathBuf;
+use jj_lib::fileset;
+use jj_lib::fileset::FilesetDiagnostics;
+use jj_lib::fileset::FilesetExpression;
+use jj_lib::fileset::FilesetParseContext;
 use tracing::instrument;
 
-use super::update_sparse_patterns_with;
 use crate::cli_util::CommandHelper;
+use crate::cli_util::print_checkout_stats;
+use crate::command_error::print_parse_diagnostics;
 use crate::command_error::CommandError;
-use crate::command_error::internal_error;
-use crate::command_error::user_error_with_message;
 use crate::description_util::TextEditor;
 use crate::ui::Ui;
 
@@ -39,45 +41,59 @@ pub async fn cmd_sparse_edit(
 ) -> Result<(), CommandError> {
     let mut workspace_command = command.workspace_helper(ui).await?;
     let editor = workspace_command.text_editor()?;
-    update_sparse_patterns_with(ui, &mut workspace_command, |_ui, old_patterns| {
-        let mut new_patterns = edit_sparse(&editor, old_patterns)?;
-        new_patterns.sort_unstable();
-        new_patterns.dedup();
-        Ok(new_patterns)
-    })
-    .await
+    
+    let old_patterns = workspace_command.working_copy().sparse_patterns()?.clone();
+    
+    let new_patterns = {
+        let context = workspace_command.env().fileset_parse_context();
+        edit_sparse(ui, &editor, &old_patterns, &context)?
+    };
+    writeln!(ui.stderr(), "Debug AST representation:\n{:#?}", new_patterns)?;
+
+    let (mut locked_ws, wc_commit) = workspace_command.start_working_copy_mutation().await?;
+    let stats = locked_ws
+        .locked_wc()
+        .set_sparse_patterns(new_patterns)
+        .await
+        .map_err(|err| crate::command_error::internal_error_with_message("Failed to update working copy paths", err))?;
+        
+    let operation_id = locked_ws.locked_wc().old_operation_id().clone();
+    locked_ws.finish(operation_id).await?;
+    print_checkout_stats(ui, &stats, &wc_commit)?;
+    
+    Ok(())
 }
 
 fn edit_sparse(
+    ui: &mut Ui,
     editor: &TextEditor,
-    sparse: &[RepoPathBuf],
-) -> Result<Vec<RepoPathBuf>, CommandError> {
-    let mut content = String::new();
-    for sparse_path in sparse {
-        // Invalid path shouldn't block editing. Edited paths will be validated.
-        let workspace_relative_sparse_path = sparse_path.to_fs_path_unchecked(Path::new(""));
-        let path_string = workspace_relative_sparse_path.to_str().ok_or_else(|| {
-            internal_error(format!(
-                "Stored sparse path is not valid utf-8: {}",
-                workspace_relative_sparse_path.display()
-            ))
-        })?;
-        writeln!(&mut content, "{path_string}").unwrap();
-    }
+    sparse: &FilesetExpression,
+    context: &FilesetParseContext<'_>,
+) -> Result<FilesetExpression, CommandError> {
+    let mut content = sparse.to_string();
+    writeln!(
+        &mut content,
+        "\n\nJJ: Edit the fileset expression above to change tracked files.\nJJ: Lines starting with 'JJ:' will be ignored."
+    )
+    .unwrap();
 
-    let content = editor
+    let edited_content = editor
         .edit_str(content, Some(".jjsparse"))
         .map_err(|err| err.with_name("sparse patterns"))?;
 
-    content
+    // Strip comments
+    let cleaned_content = edited_content
         .lines()
         .filter(|line| !line.starts_with("JJ:"))
-        .map(|line| line.trim())
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            RepoPathBuf::from_relative_path(line).map_err(|err| {
-                user_error_with_message(format!("Failed to parse sparse pattern: {line}"), err)
-            })
-        })
-        .try_collect()
+        .join("\n");
+    let cleaned_content = cleaned_content.trim();
+
+    if cleaned_content.is_empty() {
+        return Ok(FilesetExpression::none());
+    }
+
+    let mut diagnostics = FilesetDiagnostics::new();
+    let expr = fileset::parse_maybe_bare(&mut diagnostics, cleaned_content, context)?;
+    print_parse_diagnostics(ui, "In sparse patterns", &diagnostics)?;
+    Ok(expr)
 }

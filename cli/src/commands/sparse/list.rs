@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::io::Write as _;
-use std::path::Path;
 
 use tracing::instrument;
 
@@ -36,12 +35,8 @@ pub async fn cmd_sparse_list(
     _args: &SparseListArgs,
 ) -> Result<(), CommandError> {
     let workspace_command = command.workspace_helper(ui).await?;
-    for path in workspace_command.working_copy().sparse_patterns()? {
-        writeln!(
-            ui.stdout(),
-            "{}",
-            path.to_fs_path_unchecked(Path::new("")).display()
-        )?;
-    }
+    let sparse_patterns = workspace_command.working_copy().sparse_patterns()?;
+    writeln!(ui.stderr(), "Debug AST representation:\n{:#?}", sparse_patterns)?;
+    writeln!(ui.stdout(), "{}", sparse_patterns.to_string())?;
     Ok(())
 }

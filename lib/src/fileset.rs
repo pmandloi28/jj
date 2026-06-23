@@ -99,6 +99,26 @@ pub enum FilePattern {
     // - NameGlob or SuffixGlob: file name with glob?
 }
 
+impl PartialEq for FilePattern {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::FilePath(l0), Self::FilePath(r0)) => l0 == r0,
+            (Self::PrefixPath(l0), Self::PrefixPath(r0)) => l0 == r0,
+            (
+                Self::FileGlob { dir: l_dir, pattern: l_pat, icase: l_icase },
+                Self::FileGlob { dir: r_dir, pattern: r_pat, icase: r_icase },
+            ) => l_dir == r_dir && l_pat.glob() == r_pat.glob() && l_icase == r_icase,
+            (
+                Self::PrefixGlob { dir: l_dir, pattern: l_pat, icase: l_icase },
+                Self::PrefixGlob { dir: r_dir, pattern: r_pat, icase: r_icase },
+            ) => l_dir == r_dir && l_pat.glob() == r_pat.glob() && l_icase == r_icase,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for FilePattern {}
+
 impl FilePattern {
     /// Parses the given `input` string as pattern of the specified `kind`.
     pub fn from_str_kind(
@@ -327,7 +347,7 @@ fn split_glob_path_i(input: &str) -> (&str, &str) {
 }
 
 /// AST-level representation of the fileset expression.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FilesetExpression {
     /// Matches nothing.
     None,

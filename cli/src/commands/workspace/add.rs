@@ -23,6 +23,7 @@ use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::repo::Repo as _;
 use jj_lib::rewrite::merge_commit_trees;
 use jj_lib::workspace::Workspace;
+use jj_lib::fileset::FilesetExpression;
 use tracing::instrument;
 
 use crate::cli_util::CommandHelper;
@@ -154,12 +155,12 @@ pub async fn cmd_workspace_add(
 
     let sparsity = match args.sparse_patterns {
         SparseInheritance::Full => None,
-        SparseInheritance::Empty => Some(vec![]),
+        SparseInheritance::Empty => Some(FilesetExpression::none()),
         SparseInheritance::Copy => {
             let sparse_patterns = old_workspace_command
                 .working_copy()
                 .sparse_patterns()?
-                .to_vec();
+                .clone();
             Some(sparse_patterns)
         }
     };

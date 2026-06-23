@@ -129,7 +129,7 @@ fn test_root() -> TestResult {
     let mut test_workspace = TestWorkspace::init();
 
     let wc = test_workspace.workspace.working_copy();
-    assert_eq!(wc.sparse_patterns()?, vec![RepoPathBuf::root()]);
+    assert_eq!(wc.sparse_patterns()?, &jj_lib::fileset::FilesetExpression::all());
     let new_tree = test_workspace.snapshot()?;
     let repo = &test_workspace.repo;
     let wc_commit_id = repo
